@@ -29,8 +29,13 @@ public class ZoneState {
             grid[relX][relY] = p.getId();
             p.setX(newX);
             p.setY(newY);
+            this.players.put(p.getId(), p);
             return true;
         }
         return false;
+    }
+
+    public Map<String, Player> getPlayers() {
+    return this.players;
     }
 }
