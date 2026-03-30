@@ -4,6 +4,7 @@ import com.game.model.*;
 import com.game.network.RabbitConnector;
 import com.rabbitmq.client.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.*;
 import java.util.concurrent.*;
 
 public class ZoneWorker {
@@ -11,6 +12,8 @@ public class ZoneWorker {
     private final ZoneState state;
     private final ObjectMapper mapper = new ObjectMapper();
     private final Channel channel;
+    private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
+    private final Queue<PendingMove> pendingMoveQueue = new ConcurrentLinkedQueue<>();
 
     public ZoneWorker(ZoneConfig config) throws Exception {
         this.config = config;
@@ -46,7 +49,10 @@ public class ZoneWorker {
         if ("JOIN".equalsIgnoreCase(msg.getType())) {
             handleJoin(msg);
         } else if ("MOVE_INTENT".equalsIgnoreCase(msg.getType())) {
-            handleMove(msg);
+            enqueueMoveIntent(msg);
+        }
+        else {
+            System.out.println("Type de message inconnu : " + msg.getType());
         }
     }
 
@@ -81,48 +87,155 @@ public class ZoneWorker {
         }
     }
 
-    private void handleMove(GameMessage msg) {
+    private void enqueueMoveIntent(GameMessage msg) {
+        if (msg.getPayload() == null) {
+            System.out.println("[INTENT] Payload manquant");
+            return;
+        }
+
         String playerId = (String) msg.getPayload().get("playerId");
         String directionStr = (String) msg.getPayload().get("direction");
-        
-        Player p = (Player) state.getPlayers().get(playerId);
-        if (p == null) {
-            System.out.println(" [MOVE] Joueur inconnu : " + playerId);
+
+        if (playerId == null || directionStr == null) {
+            System.out.println("[INTENT] playerId ou direction manquant");
             return;
         }
 
-        int nextX = p.getX();
-        int nextY = p.getY();
-
+        Direction direction;
         try {
-            Direction dir = Direction.valueOf(directionStr.toUpperCase());
-            switch (dir) {
-                case UP:    nextY--; break;
-                case DOWN:  nextY++; break;
-                case LEFT:  nextX--; break;
-                case RIGHT: nextX++; break;
-            }
+            direction = Direction.valueOf(directionStr.toUpperCase());
         } catch (Exception e) {
-            System.out.println(" Direction invalide");
+            System.out.println("[INTENT] Direction invalide : " + directionStr);
             return;
         }
-
-        if (config.isOutside(nextX, nextY)) {
-            System.out.println(" MUR : " + playerId + " se cogne en (" + nextX + "," + nextY + ")");
-            return;
-        }
-
-        if (state.updatePosition(p, nextX, nextY, config.getMinX(), config.getMinY())) {
-            System.out.println(" [MOVE] " + playerId + " -> (" + p.getX() + "," + p.getY() + ")");
-        } else {
-            System.out.println(" COLLISION pour " + playerId);
-        }
-    }
-
+        pendingMoveQueue.offer(new PendingMove(playerId, direction, msg.getTimestamp()));
+        System.out.println("[INTENT] " + playerId + " veut aller vers " + direction);
+}
     private void startTickLoop() {
-        ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
         executor.scheduleAtFixedRate(() -> {
-            // Logique de tick future
+            try {
+                processTick();
+            } catch (Exception e) {
+                System.err.println("[TICK] Erreur pendant le traitement");
+                e.printStackTrace();
+            }
         }, 0, 200, TimeUnit.MILLISECONDS);
     }
+    private void processTick() {
+        Map<String, PendingMove> latestIntentByPlayer = new HashMap<>();
+        PendingMove move;
+        // On ne garde que la dernière intention de chaque joueur dans la file
+        while ((move = pendingMoveQueue.poll()) != null) {
+            PendingMove existing = latestIntentByPlayer.get(move.getPlayerId());
+
+            if (existing == null || move.getTimestamp() >= existing.getTimestamp()) {
+                latestIntentByPlayer.put(move.getPlayerId(), move);
+            }
+        }
+
+        if (latestIntentByPlayer.isEmpty()) {
+            return;
+        }
+
+        Map<TargetCell, List<PendingMove>> intentsByTarget = new HashMap<>();
+
+        for (PendingMove pending : latestIntentByPlayer.values()) {
+            Player player = state.getPlayers().get(pending.getPlayerId());
+
+            if (player == null) {
+                System.out.println("[TICK] Joueur inconnu : " + pending.getPlayerId());
+                continue;
+            }
+
+            int nextX = player.getX();
+            int nextY = player.getY();
+
+            switch (pending.getDirection()) {
+                case UP:
+                    nextY--;
+                    break;
+                case DOWN:
+                    nextY++;
+                    break;
+                case LEFT:
+                    nextX--;
+                    break;
+                case RIGHT:
+                    nextX++;
+                    break;
+            }
+
+            if (config.isOutside(nextX, nextY)) {
+                System.out.println("[TICK] Sortie de zone détectée pour " + pending.getPlayerId()
+                        + " vers (" + nextX + "," + nextY + ") - handover pas encore implémenté");
+                continue;
+            }
+
+            TargetCell target = new TargetCell(nextX, nextY);
+            intentsByTarget.computeIfAbsent(target, k -> new ArrayList<>()).add(pending);
+        }
+
+        for (Map.Entry<TargetCell, List<PendingMove>> entry : intentsByTarget.entrySet()) {
+            TargetCell target = entry.getKey();
+            List<PendingMove> candidates = entry.getValue();
+
+            candidates.sort(
+                    Comparator.comparingLong(PendingMove::getTimestamp)
+                            .thenComparing(PendingMove::getPlayerId)
+            );
+
+            PendingMove winner = candidates.get(0);
+            Player winnerPlayer = state.getPlayers().get(winner.getPlayerId());
+
+            if (winnerPlayer == null) {
+                continue;
+            }
+
+            boolean moved = state.updatePosition(
+                    winnerPlayer,
+                    target.getX(),
+                    target.getY(),
+                    config.getMinX(),
+                    config.getMinY()
+            );
+
+            if (moved) {
+                System.out.println("[MOVE] " + winner.getPlayerId() + " -> (" + target.getX() + "," + target.getY() + ")");
+            } else {
+                System.out.println("[MOVE] déplacement refusé pour " + winner.getPlayerId()
+                        + " vers (" + target.getX() + "," + target.getY() + ")");
+            }
+
+            for (int i = 1; i < candidates.size(); i++) {
+                PendingMove loser = candidates.get(i);
+                System.out.println("[COLLISION] " + loser.getPlayerId()
+                        + " perd l'accès à (" + target.getX() + "," + target.getY() + ")");
+            }
+        }
+
+        printState();
+    }
+    private void printState() {
+        Collection<Player> players = state.getPlayers().values();
+
+        if (players.isEmpty()) {
+            System.out.println("[SNAPSHOT-" + config.getZoneId() + "] aucun joueur");
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("[SNAPSHOT-").append(config.getZoneId()).append("] ");
+
+        for (Player p : players) {
+            sb.append(p.getId())
+            .append("(")
+            .append(p.getX())
+            .append(",")
+            .append(p.getY())
+            .append(") ");
+        }
+
+        System.out.println(sb);
+}
+
 }
