@@ -35,6 +35,22 @@ public class ZoneState {
         return false;
     }
 
+    public boolean removePlayer(String playerId, int minX, int minY) {
+        Player player = players.remove(playerId);
+        if (player == null) {
+            return false;
+        }
+
+        int localX = player.getX() - minX;
+        int localY = player.getY() - minY;
+
+        if (localX >= 0 && localX < grid.length && localY >= 0 && localY < grid[0].length) {
+            grid[localX][localY] = null;
+        }
+
+        return true;
+    }
+
     public Map<String, Player> getPlayers() {
     return this.players;
     }

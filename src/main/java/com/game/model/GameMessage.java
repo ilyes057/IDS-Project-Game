@@ -24,6 +24,8 @@ public class GameMessage {
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
 
+    public void setTargetZone(String targetZone) { this.payload.put("targetZone", targetZone); }
+    public String getTargetZone() { return (String) this.payload.get("targetZone"); }
     public String getSourceZone() { return sourceZone; }
     public void setSourceZone(String sourceZone) { this.sourceZone = sourceZone; }
 

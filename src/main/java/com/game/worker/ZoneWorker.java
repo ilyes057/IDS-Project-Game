@@ -14,7 +14,8 @@ public class ZoneWorker {
     private final Channel channel;
     private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor();
     private final Queue<PendingMove> pendingMoveQueue = new ConcurrentLinkedQueue<>();
-
+    private final Map<String, PendingTransfer> pendingTransfers = new ConcurrentHashMap<>();
+    private final Map<TargetCell, String> reservedCells = new ConcurrentHashMap<>();
     public ZoneWorker(ZoneConfig config) throws Exception {
         this.config = config;
         int width = config.getMaxX() - config.getMinX();
@@ -30,6 +31,8 @@ public class ZoneWorker {
         channel.queueDeclare(queueName, true, false, false, null);
         String routingKey = "player.input." + config.getZoneId();
         channel.queueBind(queueName, RabbitConnector.EXCHANGE_NAME, routingKey);
+        channel.queueBind(queueName, RabbitConnector.EXCHANGE_NAME, "zone.transfer.*");
+        channel.queueBind(queueName, RabbitConnector.EXCHANGE_NAME, "zone.reply." + config.getZoneId());
 
         System.out.println("Worker " + config.getZoneId() + " écoute sur : " + routingKey);
 
@@ -45,14 +48,24 @@ public class ZoneWorker {
     }
 
     private void processIncomingMessage(GameMessage msg) {
-        System.out.println("[" + config.getZoneId() + "] Message reçu: " + msg.getType());
+        String type = msg.getType();
+        System.out.println("[" + config.getZoneId() + "] Message reçu: " + type);
         if ("JOIN".equalsIgnoreCase(msg.getType())) {
             handleJoin(msg);
         } else if ("MOVE_INTENT".equalsIgnoreCase(msg.getType())) {
             enqueueMoveIntent(msg);
         }
-        else {
-            System.out.println("Type de message inconnu : " + msg.getType());
+        if (msg.getTargetZone() != null && !config.getZoneId().equals(msg.getTargetZone())) {
+            return;
+        }
+        if ("TRANSFER_PREPARE".equalsIgnoreCase(type)) {
+            handleTransferPrepare(msg);
+        } else if ("TRANSFER_ACCEPT".equalsIgnoreCase(type)) {
+            handleTransferAccept(msg);
+        } else if ("TRANSFER_REJECT".equalsIgnoreCase(type)) {
+            handleTransferReject(msg);
+        } else if ("TRANSFER_COMMIT".equalsIgnoreCase(type)) {
+            handleTransferCommit(msg);
         }
     }
 
@@ -134,6 +147,7 @@ public class ZoneWorker {
         }
 
         if (latestIntentByPlayer.isEmpty()) {
+            publishSnapshot();
             return;
         }
 
@@ -165,9 +179,25 @@ public class ZoneWorker {
                     break;
             }
 
-            if (config.isOutside(nextX, nextY)) {
-                System.out.println("[TICK] Sortie de zone détectée pour " + pending.getPlayerId()
-                        + " vers (" + nextX + "," + nextY + ") - handover pas encore implémenté");
+            // if (config.isOutside(nextX, nextY)) {
+            //     System.out.println("[TICK] Sortie de zone détectée pour " + pending.getPlayerId()
+            //             + " vers (" + nextX + "," + nextY + ") - handover pas encore implémenté");
+            //     continue;
+            // }
+            String targetZone = resolveZoneId(nextX, nextY);
+
+            if (targetZone == null) {
+                System.out.println("[TICK] Monde dépassé pour " + pending.getPlayerId()
+                        + " vers (" + nextX + "," + nextY + ")");
+                continue;
+            }
+
+            if (!targetZone.equals(config.getZoneId())) {
+                if (pendingTransfers.containsKey(pending.getPlayerId())) {
+                    continue;
+                }
+
+                startTransfer(player, targetZone, nextX, nextY, pending.getTimestamp());
                 continue;
             }
 
@@ -214,6 +244,7 @@ public class ZoneWorker {
         }
 
         printState();
+        publishSnapshot();
     }
     private void printState() {
         Collection<Player> players = state.getPlayers().values();
@@ -237,5 +268,190 @@ public class ZoneWorker {
 
         System.out.println(sb);
 }
+private void publishSnapshot() {
+    try {
+        GameMessage snapshotMsg = new GameMessage("ZONE_SNAPSHOT", config.getZoneId());
 
+        snapshotMsg.setTargetZone(config.getZoneId());
+
+        snapshotMsg.getPayload().put("zoneId", config.getZoneId());
+
+        List<Map<String, Object>> playersData = new ArrayList<>();
+
+        for (Player p : state.getPlayers().values()) {
+            Map<String, Object> playerData = new HashMap<>();
+            playerData.put("playerId", p.getId());
+            playerData.put("x", p.getX());
+            playerData.put("y", p.getY());
+            playerData.put("zoneId", p.getZone());
+            playersData.add(playerData);
+        }
+
+        snapshotMsg.getPayload().put("players", playersData);
+
+        String routingKey = "zone.snapshot." + config.getZoneId();
+        byte[] body = mapper.writeValueAsBytes(snapshotMsg);
+
+        channel.basicPublish(
+                RabbitConnector.EXCHANGE_NAME,
+                routingKey,
+                null,
+                body
+        );
+
+        System.out.println("[PUBLISH] Snapshot envoyé sur " + routingKey);
+    } catch (Exception e) {
+        System.err.println("[SNAPSHOT] Erreur lors de la publication");
+        e.printStackTrace();
+    }
+}
+private String resolveZoneId(int x, int y) {
+    if (x < 0 || x >= 20 || y < 0 || y >= 20) {
+        return null;
+    }
+    if (x < 10 && y < 10) return "A";
+    if (x >= 10 && y < 10) return "B";
+    if (x < 10 && y >= 10) return "C";
+    return "D";
+}
+
+private void startTransfer(Player player, String targetZone, int newX, int newY, long timestamp) {
+    try {
+        PendingTransfer transfer = new PendingTransfer(
+                player.getId(),
+                config.getZoneId(),
+                targetZone,
+                player.getX(),
+                player.getY(),
+                newX,
+                newY,
+                timestamp
+        );
+
+        pendingTransfers.put(player.getId(), transfer);
+
+        GameMessage msg = new GameMessage("TRANSFER_PREPARE", config.getZoneId());
+        msg.setTargetZone(targetZone);
+        msg.getPayload().put("playerId", player.getId());
+        msg.getPayload().put("oldX", player.getX());
+        msg.getPayload().put("oldY", player.getY());
+        msg.getPayload().put("newX", newX);
+        msg.getPayload().put("newY", newY);
+
+        String routingKey = "zone.transfer." + config.getZoneId() + "to" + targetZone;
+        byte[] body = mapper.writeValueAsBytes(msg);
+        channel.basicPublish(RabbitConnector.EXCHANGE_NAME, routingKey, null, body);
+
+        System.out.println("[TRANSFER] PREPARE " + player.getId() + " " + config.getZoneId() + " -> " + targetZone);
+    } catch (Exception e) {
+        System.err.println("[TRANSFER] Erreur startTransfer");
+        e.printStackTrace();
+    }
+}
+
+private void handleTransferPrepare(GameMessage msg) {
+    try {
+        String playerId = (String) msg.getPayload().get("playerId");
+        int newX = ((Number) msg.getPayload().get("newX")).intValue();
+        int newY = ((Number) msg.getPayload().get("newY")).intValue();
+
+        TargetCell target = new TargetCell(newX, newY);
+        boolean occupied = isCellOccupied(newX, newY);
+
+        GameMessage reply;
+        if (!occupied && !reservedCells.containsKey(target)) {
+            reservedCells.put(target, playerId);
+            reply = new GameMessage("TRANSFER_ACCEPT", config.getZoneId());
+            System.out.println("[TRANSFER] ACCEPT pour " + playerId + " en (" + newX + "," + newY + ")");
+        } else {
+            reply = new GameMessage("TRANSFER_REJECT", config.getZoneId());
+            System.out.println("[TRANSFER] REJECT pour " + playerId + " en (" + newX + "," + newY + ")");
+        }
+
+        reply.setTargetZone(msg.getSourceZone());
+        reply.getPayload().put("playerId", playerId);
+        reply.getPayload().put("newX", newX);
+        reply.getPayload().put("newY", newY);
+
+        String routingKey = "zone.reply." + msg.getSourceZone();
+        byte[] body = mapper.writeValueAsBytes(reply);
+        channel.basicPublish(RabbitConnector.EXCHANGE_NAME, routingKey, null, body);
+    } catch (Exception e) {
+        System.err.println("[TRANSFER] Erreur handleTransferPrepare");
+        e.printStackTrace();
+    }
+}
+
+private void handleTransferAccept(GameMessage msg) {
+    try {
+        String playerId = (String) msg.getPayload().get("playerId");
+        PendingTransfer transfer = pendingTransfers.get(playerId);
+
+        if (transfer == null) {
+            return;
+        }
+
+        Player player = state.getPlayers().get(playerId);
+        if (player == null) {
+            pendingTransfers.remove(playerId);
+            return;
+        }
+
+        state.removePlayer(playerId, config.getMinX(), config.getMinY());
+
+        GameMessage commit = new GameMessage("TRANSFER_COMMIT", config.getZoneId());
+        commit.setTargetZone(transfer.getTargetZone());
+        commit.getPayload().put("playerId", playerId);
+        commit.getPayload().put("newX", transfer.getNewX());
+        commit.getPayload().put("newY", transfer.getNewY());
+
+        String routingKey = "zone.transfer." + transfer.getSourceZone() + "to" + transfer.getTargetZone();
+        byte[] body = mapper.writeValueAsBytes(commit);
+        channel.basicPublish(RabbitConnector.EXCHANGE_NAME, routingKey, null, body);
+
+        pendingTransfers.remove(playerId);
+
+        System.out.println("[TRANSFER] COMMIT envoyé pour " + playerId);
+    } catch (Exception e) {
+        System.err.println("[TRANSFER] Erreur handleTransferAccept");
+        e.printStackTrace();
+    }
+}
+
+private void handleTransferReject(GameMessage msg) {
+    String playerId = (String) msg.getPayload().get("playerId");
+    pendingTransfers.remove(playerId);
+    System.out.println("[TRANSFER] REJECT reçu pour " + playerId + " - joueur reste sur place");
+}
+
+private void handleTransferCommit(GameMessage msg) {
+    try {
+        String playerId = (String) msg.getPayload().get("playerId");
+        int newX = ((Number) msg.getPayload().get("newX")).intValue();
+        int newY = ((Number) msg.getPayload().get("newY")).intValue();
+
+        Player newPlayer = new Player(playerId, newX, newY, config.getZoneId());
+        boolean inserted = state.updatePosition(newPlayer, newX, newY, config.getMinX(), config.getMinY());
+
+        reservedCells.remove(new TargetCell(newX, newY));
+
+        if (inserted) {
+            System.out.println("[TRANSFER] Joueur " + playerId + " inséré en (" + newX + "," + newY + ")");
+        } else {
+            System.out.println("[TRANSFER] Échec insertion pour " + playerId);
+        }
+    } catch (Exception e) {
+        System.err.println("[TRANSFER] Erreur handleTransferCommit");
+        e.printStackTrace();
+    }
+}
+
+private boolean isCellOccupied(int x, int y) {
+    for (Player p : state.getPlayers().values()) {
+        if (p.getX() == x && p.getY() == y) {
+            return true;
+        }
+    }
+    return false;
+}
 }

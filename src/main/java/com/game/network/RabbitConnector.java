@@ -18,8 +18,7 @@ public class RabbitConnector {
         Channel channel = connection.createChannel();
 
         // On déclare l'échange de type "topic"
-        channel.exchangeDeclare(EXCHANGE_NAME, "topic");
-        
+        channel.exchangeDeclare(EXCHANGE_NAME, "topic", true);
         return channel;
     }
 }
