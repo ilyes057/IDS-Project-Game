@@ -28,6 +28,7 @@ public class ZoneWorker {
 
     private void setupQueue() throws Exception {
         String queueName = "queue." + config.getZoneId();
+        channel.queuePurge(queueName);
         channel.queueDeclare(queueName, true, false, false, null);
         String routingKey = "player.input." + config.getZoneId();
         channel.queueBind(queueName, RabbitConnector.EXCHANGE_NAME, routingKey);
@@ -202,6 +203,13 @@ public class ZoneWorker {
             }
 
             TargetCell target = new TargetCell(nextX, nextY);
+            String reservedFor = reservedCells.get(target);
+            if (reservedFor != null && !reservedFor.equals(pending.getPlayerId())) {
+                System.out.println("[RESERVATION] " + pending.getPlayerId()
+                        + " ne peut pas entrer en (" + nextX + "," + nextY + ")"
+                        + " : case réservée pour " + reservedFor);
+                continue;
+            }
             intentsByTarget.computeIfAbsent(target, k -> new ArrayList<>()).add(pending);
         }
 
@@ -299,7 +307,7 @@ private void publishSnapshot() {
                 body
         );
 
-        System.out.println("[PUBLISH] Snapshot envoyé sur " + routingKey);
+        //System.out.println("[PUBLISH] Snapshot envoyé sur " + routingKey);
     } catch (Exception e) {
         System.err.println("[SNAPSHOT] Erreur lors de la publication");
         e.printStackTrace();
