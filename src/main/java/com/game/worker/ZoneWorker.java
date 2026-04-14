@@ -16,6 +16,7 @@ public class ZoneWorker {
     private final Queue<PendingMove> pendingMoveQueue = new ConcurrentLinkedQueue<>();
     private final Map<String, PendingTransfer> pendingTransfers = new ConcurrentHashMap<>();
     private final Map<TargetCell, String> reservedCells = new ConcurrentHashMap<>();
+    private final Set<String> activeHelloPairs = ConcurrentHashMap.newKeySet();
     public ZoneWorker(ZoneConfig config) throws Exception {
         this.config = config;
         int width = config.getMaxX() - config.getMinX();
@@ -148,6 +149,7 @@ public class ZoneWorker {
         }
 
         if (latestIntentByPlayer.isEmpty()) {
+            checkHelloEvents();
             publishSnapshot();
             return;
         }
@@ -250,7 +252,7 @@ public class ZoneWorker {
                         + " perd l'accès à (" + target.getX() + "," + target.getY() + ")");
             }
         }
-
+        checkHelloEvents();
         printState();
         publishSnapshot();
     }
@@ -461,5 +463,68 @@ private boolean isCellOccupied(int x, int y) {
         }
     }
     return false;
+}
+private void checkHelloEvents() {
+    Collection<Player> players = state.getPlayers().values();
+    List<Player> playerList = new ArrayList<>(players);
+
+    Set<String> currentNeighborPairs = new HashSet<>();
+
+    for (int i = 0; i < playerList.size(); i++) {
+        for (int j = i + 1; j < playerList.size(); j++) {
+            Player p1 = playerList.get(i);
+            Player p2 = playerList.get(j);
+
+            int distance = Math.abs(p1.getX() - p2.getX()) + Math.abs(p1.getY() - p2.getY());
+
+            if (distance == 1) {
+                String pairKey = buildPairKey(p1.getId(), p2.getId());
+                currentNeighborPairs.add(pairKey);
+
+                if (!activeHelloPairs.contains(pairKey)) {
+                    publishHelloEvent(p1, p2);
+                }
+            }
+        }
+    }
+
+    activeHelloPairs.clear();
+    activeHelloPairs.addAll(currentNeighborPairs);
+}
+private String buildPairKey(String playerA, String playerB) {
+    if (playerA.compareTo(playerB) < 0) {
+        return playerA + "|" + playerB;
+    }
+    return playerB + "|" + playerA;
+}
+private void publishHelloEvent(Player p1, Player p2) {
+    try {
+        GameMessage helloMsg = new GameMessage("HELLO_EVENT", config.getZoneId());
+        helloMsg.setTargetZone(config.getZoneId());
+
+        helloMsg.getPayload().put("zoneId", config.getZoneId());
+        helloMsg.getPayload().put("player1", p1.getId());
+        helloMsg.getPayload().put("player2", p2.getId());
+        helloMsg.getPayload().put("x1", p1.getX());
+        helloMsg.getPayload().put("y1", p1.getY());
+        helloMsg.getPayload().put("x2", p2.getX());
+        helloMsg.getPayload().put("y2", p2.getY());
+
+        String routingKey = "zone.event." + config.getZoneId();
+        byte[] body = mapper.writeValueAsBytes(helloMsg);
+
+        channel.basicPublish(
+                RabbitConnector.EXCHANGE_NAME,
+                routingKey,
+                null,
+                body
+        );
+
+        System.out.println("[HELLO] " + p1.getId() + " dit bonjour à "
+                + p2.getId() + " en zone " + config.getZoneId());
+    } catch (Exception e) {
+        System.err.println("[HELLO] Erreur lors de la publication");
+        e.printStackTrace();
+    }
 }
 }

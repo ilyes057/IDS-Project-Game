@@ -15,6 +15,7 @@ public class GameClient {
 
     private final Channel inputChannel;
     private final Channel snapshotChannel;
+    private final Channel eventChannel;
 
     private final AtomicReference<String> currentZone;
 
@@ -24,7 +25,8 @@ public class GameClient {
 
         this.inputChannel = RabbitConnector.createChannel();
         this.snapshotChannel = RabbitConnector.createChannel();
-
+        this.eventChannel = RabbitConnector.createChannel();
+        startEventListener();
         startSnapshotListener();
     }
 
@@ -71,6 +73,10 @@ public class GameClient {
 
     public void close() {
         try {
+            eventChannel.close();
+            } catch (Exception ignored) {
+        }
+        try {
             inputChannel.close();
         } catch (Exception ignored) {
         }
@@ -102,7 +108,46 @@ public class GameClient {
             }
         }, consumerTag -> {});
     }
+    private void startEventListener() throws Exception {
+        String queueName = eventChannel.queueDeclare().getQueue();
 
+        eventChannel.queueBind(
+                queueName,
+                RabbitConnector.EXCHANGE_NAME,
+                "zone.event.*"
+        );
+
+        System.out.println("[CLIENT] Écoute des événements sur zone.event.*");
+
+        eventChannel.basicConsume(queueName, true, (consumerTag, message) -> {
+            try {
+                GameMessage msg = mapper.readValue(message.getBody(), GameMessage.class);
+                handleEvent(msg);
+            } catch (Exception e) {
+                System.err.println("[CLIENT] Erreur lecture event");
+                e.printStackTrace();
+            }
+        }, consumerTag -> {});
+    }
+    private void handleEvent(GameMessage msg) {
+        if (!"HELLO_EVENT".equalsIgnoreCase(msg.getType())) {
+            return;
+        }
+
+        Object p1Obj = msg.getPayload().get("player1");
+        Object p2Obj = msg.getPayload().get("player2");
+        Object zoneObj = msg.getPayload().get("zoneId");
+
+        if (!(p1Obj instanceof String p1) || !(p2Obj instanceof String p2)) {
+            return;
+        }
+
+        if (playerId.equals(p1) || playerId.equals(p2)) {
+            String otherPlayer = playerId.equals(p1) ? p2 : p1;
+            System.out.println("[CLIENT] HELLO avec " + otherPlayer
+                    + " en zone " + zoneObj);
+        }
+    }
     @SuppressWarnings("unchecked")
     private void handleSnapshot(GameMessage msg) {
         if (!"ZONE_SNAPSHOT".equalsIgnoreCase(msg.getType())) {
