@@ -4,7 +4,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.game.model.GameMessage;
 import com.game.network.RabbitConnector;
 import com.rabbitmq.client.Channel;
-
+import com.game.ui.PlayerView;
+import java.util.ArrayList;
+import java.util.function.Consumer;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
@@ -12,7 +14,8 @@ import java.util.concurrent.atomic.AtomicReference;
 public class GameClient {
     private final String playerId;
     private final ObjectMapper mapper = new ObjectMapper();
-
+    private java.util.function.BiConsumer<String, List<PlayerView>> snapshotListener;
+    private Consumer<String> helloListener;
     private final Channel inputChannel;
     private final Channel snapshotChannel;
     private final Channel eventChannel;
@@ -33,7 +36,12 @@ public class GameClient {
     public String getCurrentZone() {
         return currentZone.get();
     }
-
+    public void setSnapshotListener(java.util.function.BiConsumer<String, List<PlayerView>> snapshotListener) {
+    this.snapshotListener = snapshotListener;
+    }
+    public void setHelloListener(Consumer<String> helloListener) {
+        this.helloListener = helloListener;
+    }
     public void sendJoin() throws Exception {
         GameMessage joinMsg = new GameMessage("JOIN", currentZone.get());
         joinMsg.getPayload().put("playerId", playerId);
@@ -144,8 +152,10 @@ public class GameClient {
 
         if (playerId.equals(p1) || playerId.equals(p2)) {
             String otherPlayer = playerId.equals(p1) ? p2 : p1;
-            System.out.println("[CLIENT] HELLO avec " + otherPlayer
-                    + " en zone " + zoneObj);
+            String message = "HELLO avec " + otherPlayer + " en zone " + zoneObj;
+            if (helloListener != null) {
+                helloListener.accept(message);
+            }
         }
     }
     @SuppressWarnings("unchecked")
@@ -153,12 +163,15 @@ public class GameClient {
         if (!"ZONE_SNAPSHOT".equalsIgnoreCase(msg.getType())) {
             return;
         }
-
+        Object zoneIdObj = msg.getPayload().get("zoneId");
+         if (!(zoneIdObj instanceof String snapshotZoneId)) {
+             return;
+        }
         Object playersObj = msg.getPayload().get("players");
         if (!(playersObj instanceof List<?> players)) {
             return;
         }
-
+        List<PlayerView> parsedPlayers = new ArrayList<>();
         for (Object obj : players) {
             if (!(obj instanceof Map<?, ?> rawMap)) {
                 continue;
@@ -167,18 +180,32 @@ public class GameClient {
             Map<String, Object> playerMap = (Map<String, Object>) rawMap;
 
             Object idObj = playerMap.get("playerId");
+            Object xObj = playerMap.get("x");
+            Object yObj = playerMap.get("y");
             Object zoneObj = playerMap.get("zoneId");
-
-            if (playerId.equals(idObj) && zoneObj instanceof String newZone) {
+            if (!(idObj instanceof String id)
+                || !(xObj instanceof Number xNum)
+                || !(yObj instanceof Number yNum)
+                || !(zoneObj instanceof String zone)) {
+                continue;
+            }
+            parsedPlayers.add(new PlayerView(
+                id,
+                xNum.intValue(),
+                yNum.intValue(),
+                zone
+            ));
+            if (playerId.equals(id)) {
                 String oldZone = currentZone.get();
 
-                if (!newZone.equals(oldZone)) {
-                    currentZone.set(newZone);
+                if (!zone.equals(oldZone)) {
+                    currentZone.set(zone);
                     System.out.println("[CLIENT] Changement de zone : "
-                            + oldZone + " -> " + newZone);
+                            + oldZone + " -> " + zone);
                 }
-
-                return;
+            }
+           if (snapshotListener != null) {
+                snapshotListener.accept(snapshotZoneId, parsedPlayers);
             }
         }
     }

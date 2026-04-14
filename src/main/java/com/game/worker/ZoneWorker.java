@@ -29,8 +29,8 @@ public class ZoneWorker {
 
     private void setupQueue() throws Exception {
         String queueName = "queue." + config.getZoneId();
-        channel.queuePurge(queueName);
         channel.queueDeclare(queueName, true, false, false, null);
+        channel.queuePurge(queueName);
         String routingKey = "player.input." + config.getZoneId();
         channel.queueBind(queueName, RabbitConnector.EXCHANGE_NAME, routingKey);
         channel.queueBind(queueName, RabbitConnector.EXCHANGE_NAME, "zone.transfer.*");
