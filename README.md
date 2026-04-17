@@ -1,3 +1,33 @@
+## Test local sur un seul PC avec 2 joueurs
+
+Ce test permet de vérifier localement :
+
+- le lancement des 4 workers
+- les déplacements
+- les transferts inter-zones
+- le `HELLO_EVENT`
+- le client graphique
+- les tests console avec deux joueurs
+
+### 1. Compiler
+
+```bash
+mvn clean compile
+### 2 purger les queues RabbitMQ
+sudo rabbitmqctl purge_queue queue.A
+sudo rabbitmqctl purge_queue queue.B
+sudo rabbitmqctl purge_queue queue.C
+sudo rabbitmqctl purge_queue queue.D
+### 3 lancer les 4 workers
+mvn -q exec:java -Dexec.mainClass=com.game.Main -Dexec.args=A 
+mvn -q exec:java -Dexec.mainClass=com.game.Main -Dexec.args=B 
+mvn -q exec:java -Dexec.mainClass=com.game.Main -Dexec.args=C 
+mvn -q exec:java -Dexec.mainClass=com.game.Main -Dexec.args=D 
+### 4 lancef deuxx clients graphiques
+mvn -q exec:java -Dexec.mainClass=com.game.ui.GameViewerMain -Dexec.args="A P1" 
+mvn -q exec:java -Dexec.mainClass=com.game.ui.GameViewerMain -Dexec.args="B P2" 
+```
+
 # 🖧 Test distribué sur 2 PC
 
 Ce guide explique **exactement** comment lancer le projet sur **2 PC différents** connectés au même réseau.
